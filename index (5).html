@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robot Cell Factory – AR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --yellow: #ffc700;
+    --steel: #1d2126;
+    --steel-2: #2b3138;
+    --paper: #f1f2f3;
+    --ink: #14171a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfd3d8; font-family: "Barlow", system-ui, sans-serif; color: var(--ink); touch-action: none; }
+  canvas { display: block; }
+
+  /* Normal (non-AR) screen */
+  #hud { position: fixed; inset: 0; pointer-events: none; padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; justify-content: space-between; }
+  .title { align-self: flex-start; background: var(--steel); color: #fff; padding: 10px 14px 10px 12px; border-left: 8px solid var(--yellow); font-family: "Barlow Condensed", sans-serif; font-weight: 700; font-size: 22px; line-height: 1.05; letter-spacing: .01em; }
+  .title small { display: block; font-family: "Barlow", sans-serif; font-weight: 400; font-size: 12.5px; color: #b9c0c8; margin-top: 3px; letter-spacing: 0; }
+  .panel { pointer-events: auto; align-self: stretch; max-width: 460px; background: var(--paper); border-top: 6px solid var(--yellow); padding: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+  .panel p { margin: 0 0 12px; font-size: 15px; line-height: 1.4; }
+  button { font-family: "Barlow Condensed", sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .02em; border: 0; cursor: pointer; padding: 12px 18px; min-height: 48px; }
+  button:focus-visible { outline: 3px solid #0b5fff; outline-offset: 2px; }
+  #startAR { width: 100%; background: var(--yellow); color: var(--ink); }
+  #startAR[disabled] { background: #b9bcc0; color: #55595e; cursor: not-allowed; }
+  #note { margin-top: 10px; font-size: 13px; color: #4a5057; line-height: 1.35; }
+
+  /* AR overlay */
+  #arui { position: fixed; inset: 0; display: none; pointer-events: none; flex-direction: column; justify-content: space-between; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
+  #arui .hint { align-self: center; background: rgba(20,23,26,.88); color: #fff; padding: 10px 14px; font-size: 15px; text-align: center; max-width: 92vw; }
+  #arui .row { pointer-events: auto; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  #arui .row button { background: rgba(241,242,243,.96); color: var(--ink); min-width: 64px; padding: 10px 12px; }
+  #arui .row button.on { background: var(--yellow); }
+  #arui .row button.exit { background: var(--steel); color: #fff; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="title">Robot cell factory<small>6 pick-and-place cells, 3 per side</small></div>
+  <div class="panel">
+    <p id="msg">Drag to look around. Pinch to zoom. To see it in your room, start AR and point the phone at the floor.</p>
+    <button id="startAR" disabled>Checking AR support…</button>
+    <div id="note"></div>
+  </div>
+</div>
+
+<div id="arui">
+  <div class="hint" id="arhint">Move the phone slowly over the floor, then tap the ring to place the factory.</div>
+  <div class="row">
+    <button data-s="1">1:1</button>
+    <button data-s="0.25" class="on">1:4</button>
+    <button data-s="0.1">1:10</button>
+    <button id="reset">Reset</button>
+    <button id="exit" class="exit">Exit AR</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/BufferGeometryUtils.js"></script>
+<script>
+(() => {
+  // ------------------------------------------------------------------ renderer / scene
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.xr.enabled = true;
+  document.body.prepend(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xcfd3d8);
+
+  const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 100);
+  camera.position.set(0, 5.5, -5.5);
+  if (innerWidth < innerHeight) camera.position.set(0, 10, -10);   // portrait phones need to stand further back
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0.3, 0.5);
+  controls.enableDamping = true;
+  controls.maxPolarAngle = Math.PI * 0.49;
+  controls.update();
+
+  // Soft reflections so metal and paint look right
+  function makeEnv() {
+    const pm = new THREE.PMREMGenerator(renderer);
+    const s = new THREE.Scene();
+    const c = document.createElement('canvas'); c.width = 4; c.height = 256;
+    const g = c.getContext('2d');
+    const gr = g.createLinearGradient(0, 0, 0, 256);
+    gr.addColorStop(0, '#d6e6ff'); gr.addColorStop(0.5, '#e9e9ea'); gr.addColorStop(1, '#6d6d72');
+    g.fillStyle = gr; g.fillRect(0, 0, 4, 256);
+    const tex = new THREE.CanvasTexture(c);
+    s.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide })));
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(30, 4), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    strip.position.set(0, 40, 0); strip.rotation.x = Math.PI / 2; s.add(strip);
+    const rt = pm.fromScene(s); pm.dispose();
+    return rt.texture;
+  }
+  scene.environment = makeEnv();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f96, 0.5));
+
+  // Everything lives in `factory` so AR can move / scale / rotate it as one piece
+  const factory = new THREE.Group();
+  scene.add(factory);
+
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(4, 8, -3);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.bias = -0.0005;
+  factory.add(sun); factory.add(sun.target);
+  function fitShadow(s) {
+    const c = sun.shadow.camera;
+    c.left = -7 * s; c.right = 7 * s; c.top = 7 * s; c.bottom = -7 * s; c.near = 0.5 * s; c.far = 30 * s;
+    c.updateProjectionMatrix();
+  }
+  fitShadow(1);
+
+  // ------------------------------------------------------------------ materials / helpers
+  const M = (color, metalness = 0.1, roughness = 0.5) => new THREE.MeshStandardMaterial({ color, metalness, roughness });
+  const mat = {
+    blue: M(0x0a38cc, 0.2, 0.3), dark: M(0x1a1a1f, 0.3, 0.5), steel: M(0xb8bcc4, 0.9, 0.35),
+    cream: M(0xd6c9a3, 0, 0.7), yellow: M(0xffc700, 0, 0.5), wood: M(0x9e7240, 0, 0.9),
+    rubber: M(0x0a0a0a, 0, 0.9), grey: M(0x595e66, 0.3, 0.6), hose: M(0x0d2688, 0, 0.3),
+    alu: M(0xd4d6da, 1, 0.3), brass: M(0xd99e38, 1, 0.35), orange: M(0xff6610, 0.2, 0.5),
+    screen: new THREE.MeshStandardMaterial({ color: 0x103a8a, emissive: 0x1a66ff, emissiveIntensity: 1.2 }),
+    red: new THREE.MeshStandardMaterial({ color: 0xcc1111, emissive: 0xff2222, emissiveIntensity: 0.8 }),
+    green: new THREE.MeshStandardMaterial({ color: 0x11aa33, emissive: 0x22ff55, emissiveIntensity: 0.8 })
+  };
+
+  // Wire-mesh fence texture (transparent background, alpha cut-out)
+  const fenceCanvas = document.createElement('canvas'); fenceCanvas.width = fenceCanvas.height = 32;
+  { const g = fenceCanvas.getContext('2d'); g.clearRect(0, 0, 32, 32); g.fillStyle = '#4d525c'; g.fillRect(0, 0, 3, 32); g.fillRect(0, 0, 32, 3); }
+  const fenceTex = new THREE.CanvasTexture(fenceCanvas);
+  fenceTex.wrapS = fenceTex.wrapT = THREE.RepeatWrapping;
+  fenceTex.repeat.set(1.9 / 0.12, 1.32 / 0.12);
+  fenceTex.generateMipmaps = false; fenceTex.minFilter = THREE.LinearFilter; fenceTex.encoding = THREE.sRGBEncoding;
+  const fenceMat = new THREE.MeshStandardMaterial({ map: fenceTex, alphaTest: 0.5, side: THREE.DoubleSide, metalness: 0.5, roughness: 0.5 });
+
+  const geoCache = new Map();
+  const gBox = (w, h, d) => { const k = 'b' + w + ',' + h + ',' + d; if (!geoCache.has(k)) geoCache.set(k, new THREE.BoxGeometry(w, h, d)); return geoCache.get(k); };
+  const gCyl = (d, l) => { const k = 'c' + d + ',' + l; if (!geoCache.has(k)) geoCache.set(k, new THREE.CylinderGeometry(d / 2, d / 2, l, 24)); return geoCache.get(k); };
+  function put(geo, m, parent, x, y, z) { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; o.receiveShadow = true; parent.add(o); return o; }
+  const box = (p, w, h, d, x, y, z, m) => put(gBox(w, h, d), m, p, x, y, z);
+  function cyl(p, dia, len, x, y, z, m, axis) {
+    const o = put(gCyl(dia, len), m, p, x, y, z);
+    if (axis === 'x') o.rotation.z = Math.PI / 2; else if (axis === 'z') o.rotation.x = Math.PI / 2;
+    return o;
+  }
+  function pivot(p, x, y, z) { const g = new THREE.Group(); g.position.set(x, y, z); p.add(g); return g; }
+
+  // Merge all static meshes of a group by material (fewer draw calls on phones)
+  function bake(group) {
+    group.updateMatrixWorld(true);
+    const buckets = new Map();
+    group.traverse(o => {
+      if (!o.isMesh) return;
+      const g = o.geometry.clone(); g.applyMatrix4(o.matrixWorld);
+      const a = buckets.get(o.material) || []; a.push(g); buckets.set(o.material, a);
+    });
+    const out = new THREE.Group();
+    buckets.forEach((arr, m) => {
+      const o = new THREE.Mesh(THREE.BufferGeometryUtils.mergeBufferGeometries(arr), m);
+      o.castShadow = true; o.receiveShadow = true; out.add(o);
+    });
+    return out;
+  }
+
+  // ------------------------------------------------------------------ cell constants
+  const L1 = 0.6, L2 = 0.55, G = 0.24, SH = 0.35, TRAY = 0.04, PS = 0.08, HOVER = 0.42;
+  const pickC = new THREE.Vector3(-0.6, 0, 0.55), placeC = new THREE.Vector3(0.6, 0, 0.55);
+  const slot = (c, i) => new THREE.Vector3(c.x + ((i % 3) - 1) * 0.14, TRAY + PS / 2, c.z + (Math.floor(i / 3) - 0.5) * 0.14);
+  const hover = p => new THREE.Vector3(p.x, HOVER, p.z);
+  const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
+
+  // ------------------------------------------------------------------ static part of a cell
+  function buildStatic() {
+    const g = new THREE.Group(), p = 0.98;
+    box(g, 1.92, 0.06, 1.92, 0, -0.47, 0, mat.dark);
+    box(g, 1.9, 0.42, 1.9, 0, -0.23, 0, mat.cream);
+    box(g, 1.86, 0.02, 1.86, 0, -0.01, 0, mat.steel);
+    for (const x of [-p, p]) for (const z of [-p, p]) {
+      box(g, 0.08, 2.1, 0.08, x, 0.55, z, mat.yellow);
+      box(g, 0.16, 0.03, 0.16, x, -0.485, z, mat.dark);
+    }
+    for (const z of [-p, p]) box(g, 2.04, 0.06, 0.06, 0, 1.6, z, mat.yellow);
+    for (const x of [-p, p]) box(g, 0.06, 0.06, 2.04, x, 1.6, 0, mat.yellow);
+
+    const fp = (x, z, ry) => { const o = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.32), fenceMat); o.position.set(x, 0.91, z); o.rotation.y = ry; g.add(o); };
+    fp(0, p, 0); fp(-p, 0, Math.PI / 2); fp(p, 0, Math.PI / 2);
+    box(g, 1.9, 0.25, 0.02, 0, 0.125, p, mat.grey);
+    box(g, 0.02, 0.25, 1.9, -p, 0.125, 0, mat.grey);
+    box(g, 0.02, 0.25, 1.9, p, 0.125, 0, mat.grey);
+    box(g, 0.05, 1.6, 0.05, 0, 0.8, p, mat.yellow);
+    box(g, 0.05, 1.6, 0.05, -p, 0.8, 0, mat.yellow);
+    box(g, 0.05, 1.6, 0.05, p, 0.8, 0, mat.yellow);
+
+    cyl(g, 0.07, 0.03, -p, 1.645, -p, mat.dark);
+    cyl(g, 0.07, 0.02, -p, 1.89, -p, mat.dark);
+
+    // pick tray
+    box(g, 0.5, TRAY, 0.35, pickC.x, TRAY / 2, pickC.z, mat.steel);
+    box(g, 0.5, 0.015, 0.012, pickC.x, 0.0475, pickC.z - 0.169, mat.steel);
+    box(g, 0.5, 0.015, 0.012, pickC.x, 0.0475, pickC.z + 0.169, mat.steel);
+    box(g, 0.012, 0.015, 0.35, pickC.x - 0.244, 0.0475, pickC.z, mat.steel);
+    box(g, 0.012, 0.015, 0.35, pickC.x + 0.244, 0.0475, pickC.z, mat.steel);
+    for (let i = 0; i < 6; i++) { const s = slot(pickC, i); box(g, 0.1, 0.002, 0.1, s.x, TRAY + 0.001, s.z, mat.dark); }
+
+    // pallet
+    for (const x of [-0.2, 0, 0.2]) box(g, 0.07, 0.015, 0.35, placeC.x + x, 0.0075, placeC.z, mat.wood);
+    for (const z of [-0.14, -0.047, 0.047, 0.14]) box(g, 0.5, 0.025, 0.07, placeC.x, 0.0275, placeC.z + z, mat.wood);
+
+    // control pendant
+    const px = 1.15, pz = -0.6;
+    cyl(g, 0.05, 1.5, px, 0.25, pz, mat.grey);
+    box(g, 0.16, 0.3, 0.1, px, 1.1, pz, mat.cream);
+    box(g, 0.11, 0.08, 0.005, px, 1.18, pz - 0.052, mat.screen);
+    cyl(g, 0.05, 0.015, px - 0.04, 1.06, pz - 0.057, mat.yellow, 'z');
+    cyl(g, 0.04, 0.02, px - 0.04, 1.06, pz - 0.072, mat.red, 'z');
+    cyl(g, 0.03, 0.012, px + 0.04, 1.06, pz - 0.055, mat.green, 'z');
+    return bake(g);
+  }
+  const staticTemplate = buildStatic();
+
+  // ------------------------------------------------------------------ tweening that also runs inside AR
+  const tweens = [];
+  function tween(time, fn) { return new Promise(res => tweens.push({ t: 0, time: Math.max(time, 0.001), fn, res })); }
+  const wait = s => tween(s, () => {});
+  function stepTweens(dt) {
+    for (let i = tweens.length - 1; i >= 0; i--) {
+      const tw = tweens[i];
+      tw.t = Math.min(1, tw.t + dt / tw.time);
+      tw.fn(tw.t);
+      if (tw.t >= 1) { tweens.splice(i, 1); tw.res(); }
+    }
+  }
+
+  // ------------------------------------------------------------------ one cell (robot + animation)
+  function makeLamp(hex) { return new THREE.MeshStandardMaterial({ color: new THREE.Color(hex).multiplyScalar(0.3), emissive: hex, emissiveIntensity: 0, roughness: 0.4 }); }
+  function setLamp(m, hex, on) { m.color.set(hex).multiplyScalar(on ? 1 : 0.3); m.emissiveIntensity = on ? 1.6 : 0; }
+
+  function makeCell(x, z, yawDeg, delay) {
+    const cell = new THREE.Group();
+    cell.position.set(x, 0.5, z);
+    cell.rotation.y = yawDeg * Math.PI / 180;
+    cell.add(staticTemplate.clone());
+
+    // stack light
+    const lG = makeLamp(0x22ff55), lA = makeLamp(0xff9900), lR = makeLamp(0xff2222);
+    cyl(cell, 0.065, 0.07, -0.98, 1.695, -0.98, lG);
+    cyl(cell, 0.065, 0.07, -0.98, 1.765, -0.98, lA);
+    cyl(cell, 0.065, 0.07, -0.98, 1.835, -0.98, lR);
+    const setState = s => { setLamp(lG, 0x22ff55, s === 1); setLamp(lA, 0xff9900, s === 0); setLamp(lR, 0xff2222, false); };
+    setState(0);
+
+    // robot
+    const r = new THREE.Group(); cell.add(r);
+    box(r, 0.5, 0.03, 0.5, 0, 0.015, 0, mat.dark);
+    for (const bx of [-0.2, 0.2]) for (const bz of [-0.2, 0.2]) cyl(r, 0.03, 0.012, bx, 0.036, bz, mat.steel);
+    cyl(r, 0.36, 0.17, 0, 0.115, 0, mat.blue);
+    cyl(r, 0.38, 0.015, 0, 0.2, 0, mat.dark);
+
+    const baseJ = pivot(r, 0, 0.2, 0);
+    cyl(baseJ, 0.32, 0.14, 0, 0.07, 0, mat.blue);
+    box(baseJ, 0.24, 0.2, 0.26, 0, 0.17, 0, mat.blue);
+    cyl(baseJ, 0.11, 0.1, 0.17, 0.15, 0, mat.dark, 'x');
+
+    const shoulder = pivot(baseJ, 0, 0.15, 0);
+    cyl(shoulder, 0.2, 0.22, 0, 0, 0, mat.blue, 'x');
+    cyl(shoulder, 0.13, 0.02, -0.115, 0, 0, mat.dark, 'x');
+    cyl(shoulder, 0.13, 0.02, 0.115, 0, 0, mat.dark, 'x');
+    box(shoulder, 0.13, L1 - 0.08, 0.12, 0, L1 / 2, 0, mat.blue);
+    cyl(shoulder, 0.03, L1 - 0.1, 0.05, L1 / 2, -0.085, mat.hose);
+
+    const elbow = pivot(shoulder, 0, L1, 0);
+    cyl(elbow, 0.17, 0.2, 0, 0, 0, mat.blue, 'x');
+    cyl(elbow, 0.11, 0.02, -0.105, 0, 0, mat.dark, 'x');
+    cyl(elbow, 0.11, 0.02, 0.105, 0, 0, mat.dark, 'x');
+    box(elbow, 0.10, L2 - 0.18, 0.10, 0, (L2 - 0.1) / 2 + 0.04, 0, mat.blue);
+    cyl(elbow, 0.025, L2 - 0.1, 0.04, L2 / 2, -0.07, mat.hose);
+    cyl(elbow, 0.11, 0.14, 0, L2 - 0.07, 0, mat.blue);
+
+    const wrist = pivot(elbow, 0, L2, 0);
+    cyl(wrist, 0.09, 0.13, 0, 0, 0, mat.dark, 'x');
+
+    const roll = pivot(wrist, 0, 0, 0);
+    cyl(roll, 0.08, 0.03, 0, 0.015, 0, mat.steel);
+    cyl(roll, 0.06, 0.02, 0, 0.04, 0, mat.dark);
+    box(roll, 0.15, 0.05, 0.07, 0, 0.065, 0, mat.dark);
+    box(roll, 0.2, 0.012, 0.03, 0, 0.092, 0, mat.steel);
+    const fingerL = pivot(roll, -0.075, 0, 0), fingerR = pivot(roll, 0.075, 0, 0);
+    box(fingerL, 0.02, 0.15, 0.06, 0, 0.165, 0, mat.steel);
+    box(fingerL, 0.006, 0.06, 0.055, 0.012, 0.205, 0, mat.rubber);
+    box(fingerR, 0.02, 0.15, 0.06, 0, 0.165, 0, mat.steel);
+    box(fingerR, 0.006, 0.06, 0.055, -0.012, 0.205, 0, mat.rubber);
+
+    // state
+    const st = { tool: hover(slot(pickC, 0)), grip: 1 };
+    let parts = [];
+
+    function spawnParts() {
+      parts.forEach(o => o.parent && o.parent.remove(o));
+      parts = [];
+      for (let i = 0; i < 6; i++) {
+        const round = i % 2 === 1;
+        const m = round ? mat.brass : (i % 4 === 0 ? mat.alu : mat.orange);
+        const o = put(round ? gCyl(PS, PS) : gBox(PS, PS, PS), m, cell, 0, 0, 0);
+        o.position.copy(slot(pickC, i));
+        parts.push(o);
+      }
+    }
+
+    // inverse kinematics (same maths as the Unity version)
+    function update() {
+      const t = st.tool;
+      const yaw = Math.atan2(t.x, t.z);
+      const rr = Math.hypot(t.x, t.z);
+      const h = t.y + G - SH;
+      const d = clamp(Math.hypot(rr, h), Math.abs(L1 - L2) + 0.01, L1 + L2 - 0.01);
+      const phi = Math.atan2(rr, h);
+      const alpha = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+      const beta = Math.acos(clamp((L1 * L1 + L2 * L2 - d * d) / (2 * L1 * L2), -1, 1));
+      const a1 = phi - alpha, a2 = Math.PI - beta, a3 = Math.PI - a1 - a2;
+      baseJ.rotation.y = yaw; shoulder.rotation.x = a1; elbow.rotation.x = a2; wrist.rotation.x = a3; roll.rotation.y = yaw;
+      const gap = 0.05 + 0.025 * st.grip;
+      fingerL.position.x = -gap; fingerR.position.x = gap;
+    }
+
+    const move = (to, time) => { const from = st.tool.clone(); return tween(time, u => { const s = u * u * (3 - 2 * u); st.tool = new THREE.Vector3().lerpVectors(from, to, s); }); };
+    const grip = (v, time) => { const f = st.grip; return tween(time, u => { st.grip = f + (v - f) * u; }); };
+
+    async function run() {
+      spawnParts(); setState(0);
+      await wait(delay); setState(1);
+      for (;;) {
+        for (let i = 0; i < parts.length; i++) {
+          const pick = slot(pickC, i), place = slot(placeC, i);
+          await move(hover(pick), 1.0);
+          await grip(1, 0.25);
+          await move(pick, 0.6);
+          await grip(0, 0.3);
+          await wait(0.1);
+          roll.attach(parts[i]);
+          await move(hover(pick), 0.6);
+          await move(hover(place), 1.0);
+          await move(place, 0.6);
+          await grip(1, 0.3);
+          cell.attach(parts[i]);
+          await wait(0.1);
+          await move(hover(place), 0.6);
+        }
+        setState(0);
+        await move(hover(slot(pickC, 0)), 1.0);
+        await wait(1.5);
+        spawnParts();
+        await wait(0.5);
+        setState(1);
+      }
+    }
+
+    cell.userData.update = update;
+    update();
+    run();
+    return cell;
+  }
+
+  // ------------------------------------------------------------------ build the factory: 3 cells per side
+  const cells = [];
+  [-2.8, 0, 2.8].forEach((z, n) => {
+    cells.push(makeCell(-3.3, z, -90, 1 + n * 0.5));
+    cells.push(makeCell(3.3, z, 90, 1.25 + n * 0.5));
+  });
+  cells.forEach(c => factory.add(c));
+
+  // virtual room (3D view only)
+  const room = new THREE.Group(); factory.add(room);
+  const wallM = M(0xdfe3e8, 0, 0.9);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(10, 10).rotateX(-Math.PI / 2), M(0x777b82, 0, 0.9));
+  floor.receiveShadow = true; room.add(floor);
+  box(room, 10, 3, 0.1, 0, 1.5, 4.05, wallM);
+  box(room, 0.1, 3, 10, -5.05, 1.5, 0, wallM);
+  box(room, 0.1, 3, 10, 5.05, 1.5, 0, wallM);
+  box(room, 0.08, 0.01, 8.5, -2.4, 0.005, 0, mat.yellow);   // aisle lines
+  box(room, 0.08, 0.01, 8.5, 2.4, 0.005, 0, mat.yellow);
+
+  // shadow catcher on the real floor (AR only)
+  const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(14, 14).rotateX(-Math.PI / 2), new THREE.ShadowMaterial({ opacity: 0.3 }));
+  shadowPlane.position.y = 0.001; shadowPlane.receiveShadow = true; shadowPlane.visible = false; factory.add(shadowPlane);
+
+  // ------------------------------------------------------------------ AR
+  const startBtn = document.getElementById('startAR');
+  const hud = document.getElementById('hud');
+  const arui = document.getElementById('arui');
+  const arhint = document.getElementById('arhint');
+  const note = document.getElementById('note');
+  arui.addEventListener('beforexrselect', e => e.preventDefault());
+
+  const reticle = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.16, 40).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffc700 }));
+  reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
+
+  let inAR = false, placed = false, hitSource = null, scaleVal = 0.25, xrSession = null;
+
+  function setScale(s) {
+    scaleVal = s; factory.scale.setScalar(s); fitShadow(s);
+    arui.querySelectorAll('button[data-s]').forEach(b => b.classList.toggle('on', parseFloat(b.dataset.s) === s));
+  }
+  arui.querySelectorAll('button[data-s]').forEach(b => b.addEventListener('click', () => setScale(parseFloat(b.dataset.s))));
+  document.getElementById('reset').addEventListener('click', () => { placed = false; factory.visible = false; arhint.textContent = 'Tap the ring on the floor to place the factory.'; });
+  document.getElementById('exit').addEventListener('click', () => xrSession && xrSession.end());
+
+  let hasHit = false;
+
+  function onSelect() {
+    const xc = renderer.xr.getCamera(camera);
+    const dir = new THREE.Vector3(); xc.getWorldDirection(dir);
+    if (reticle.visible) {
+      factory.position.setFromMatrixPosition(reticle.matrix);
+    } else if (!hasHit) {
+      // No floor detection on this device: drop it 2 m ahead, about 1.4 m below the phone
+      const p = new THREE.Vector3().setFromMatrixPosition(xc.matrixWorld);
+      factory.position.set(p.x + dir.x * 2, p.y - 1.4, p.z + dir.z * 2);
+    } else return;
+    factory.rotation.y = Math.atan2(dir.x, dir.z);       // aisle runs away from you
+    setScale(scaleVal);
+    factory.visible = true; placed = true;
+    arhint.textContent = 'Placed. Tap another spot on the floor to move it, or change the scale below.';
+  }
+
+  async function requestXR() {
+    const attempts = [
+      { requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay'], domOverlay: { root: arui } },
+      { requiredFeatures: ['hit-test'] },
+      { optionalFeatures: ['hit-test', 'dom-overlay'], domOverlay: { root: arui } },
+      {}
+    ];
+    let lastErr;
+    for (const opt of attempts) {
+      try { return await navigator.xr.requestSession('immersive-ar', opt); } catch (e) { lastErr = e; }
+    }
+    throw lastErr;
+  }
+
+  async function startAR() {
+    if (!window.isSecureContext) {
+      note.textContent = 'AR needs a secure (https) page. Open the hosted link, not a file shared through WhatsApp or Files.';
+      return;
+    }
+    arui.style.display = 'flex';
+    try { xrSession = await requestXR(); }
+    catch (e) { arui.style.display = 'none'; note.textContent = 'Could not start AR: ' + e.message + '. Make sure Google Play Services for AR is installed and updated.'; return; }
+
+    renderer.xr.setReferenceSpaceType('local');
+    await renderer.xr.setSession(xrSession);
+    hasHit = false; hitSource = null;
+    try {
+      const viewer = await xrSession.requestReferenceSpace('viewer');
+      hitSource = await xrSession.requestHitTestSource({ space: viewer });
+      hasHit = !!hitSource;
+    } catch (e) { hitSource = null; }
+    xrSession.addEventListener('select', onSelect);
+    xrSession.addEventListener('end', endAR);
+
+    inAR = true; placed = false;
+    scene.background = null;
+    room.visible = false; shadowPlane.visible = true; factory.visible = false;
+    hud.style.display = 'none'; arui.style.display = 'flex';
+    arhint.textContent = hasHit
+      ? 'Move the phone slowly over the floor, then tap the ring to place the factory.'
+      : 'Floor detection is not available here. Aim ahead and tap to place the factory about 2 m in front of you.';
+    setScale(0.25);
+  }
+
+  function endAR() {
+    inAR = false; hitSource = null; xrSession = null; reticle.visible = false;
+    scene.background = new THREE.Color(0xcfd3d8);
+    room.visible = true; shadowPlane.visible = false;
+    factory.visible = true; factory.position.set(0, 0, 0); factory.rotation.set(0, 0, 0); factory.scale.setScalar(1); fitShadow(1);
+    hud.style.display = 'flex'; arui.style.display = 'none';
+  }
+
+  startBtn.addEventListener('click', startAR);
+
+  (async () => {
+    if (!navigator.xr) {
+      startBtn.textContent = 'AR not available here';
+      note.textContent = 'Open this page in Chrome on an Android phone with Google Play Services for AR. iPhone Safari does not support web AR. The 3D view above still works.';
+      return;
+    }
+    let ok = false;
+    try { ok = await navigator.xr.isSessionSupported('immersive-ar'); } catch (e) {}
+    if (ok) { startBtn.disabled = false; startBtn.textContent = 'View in my room (AR)'; }
+    else {
+      startBtn.textContent = 'AR not supported on this device';
+      note.textContent = 'On Android, use Chrome and install Google Play Services for AR from the Play Store. The page must be opened over https. The 3D view still works.';
+    }
+  })();
+
+  // ------------------------------------------------------------------ loop
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop((time, frame) => {
+    const dt = Math.min(clock.getDelta(), 0.05);
+    if (factory.visible) stepTweens(dt);          // robots wait until the factory is placed
+    cells.forEach(c => c.userData.update());
+
+    if (inAR && frame && hitSource) {
+      const hits = frame.getHitTestResults(hitSource);
+      if (hits.length) {
+        const pose = hits[0].getPose(renderer.xr.getReferenceSpace());
+        reticle.visible = true; reticle.matrix.fromArray(pose.transform.matrix);
+      } else reticle.visible = false;
+    }
+    if (!inAR) controls.update();
+    renderer.render(scene, camera);
+  });
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+})();
+</script>
+</body>
+</html>
