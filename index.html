@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Robot Cell Factory – AR</title>
+<title>Palletizing Cell Factory – AR</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
@@ -31,8 +31,13 @@
   #startAR[disabled] { background: #b9bcc0; color: #55595e; cursor: not-allowed; }
   #note { margin-top: 10px; font-size: 13px; color: #4a5057; line-height: 1.35; }
 
+  .zoom { position: fixed; right: max(12px, env(safe-area-inset-right)); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: auto; }
+  .zoom button { background: var(--paper); color: var(--ink); width: 52px; min-height: 52px; padding: 0; font-size: 28px; line-height: 1; border-bottom: 4px solid var(--yellow); }
+
   /* AR overlay */
   #arui { position: fixed; inset: 0; display: none; pointer-events: none; flex-direction: column; justify-content: space-between; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
+  #gest { position: absolute; inset: 0; pointer-events: auto; touch-action: none; }
+  #arui .hint, #arui .row { position: relative; z-index: 2; }
   #arui .hint { align-self: center; background: rgba(20,23,26,.88); color: #fff; padding: 10px 14px; font-size: 15px; text-align: center; max-width: 92vw; }
   #arui .row { pointer-events: auto; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
   #arui .row button { background: rgba(241,242,243,.96); color: var(--ink); min-width: 64px; padding: 10px 12px; }
@@ -42,8 +47,10 @@
 </head>
 <body>
 
+<div class="zoom" id="zoom3d"><button id="z3in" aria-label="Zoom in">+</button><button id="z3out" aria-label="Zoom out">&minus;</button></div>
+
 <div id="hud">
-  <div class="title">Robot cell factory<small>6 pick-and-place cells, 3 per side</small></div>
+  <div class="title">Palletizing factory<small>6 palletizing cells, 3 per side</small></div>
   <div class="panel">
     <p id="msg">Drag to look around. Pinch to zoom. To see it in your room, start AR and point the phone at the floor.</p>
     <button id="startAR" disabled>Checking AR support…</button>
@@ -52,8 +59,11 @@
 </div>
 
 <div id="arui">
+  <div id="gest"></div>
   <div class="hint" id="arhint">Move the phone slowly over the floor, then tap the ring to place the factory.</div>
   <div class="row">
+    <button id="zout" aria-label="Zoom out">&minus;</button>
+    <button id="zin" aria-label="Zoom in">+</button>
     <button data-s="1">1:1</button>
     <button data-s="0.25" class="on">1:4</button>
     <button data-s="0.1">1:10</button>
@@ -88,6 +98,8 @@
   controls.target.set(0, 0.3, 0.5);
   controls.enableDamping = true;
   controls.maxPolarAngle = Math.PI * 0.49;
+  controls.minDistance = 1.2; controls.maxDistance = 30;
+  controls.enableZoom = true;
   controls.update();
 
   // Soft reflections so metal and paint look right
@@ -133,6 +145,8 @@
     cream: M(0xd6c9a3, 0, 0.7), yellow: M(0xffc700, 0, 0.5), wood: M(0x9e7240, 0, 0.9),
     rubber: M(0x0a0a0a, 0, 0.9), grey: M(0x595e66, 0.3, 0.6), hose: M(0x0d2688, 0, 0.3),
     alu: M(0xd4d6da, 1, 0.3), brass: M(0xd99e38, 1, 0.35), orange: M(0xff6610, 0.2, 0.5),
+    white: M(0xf0f1f2, 0.15, 0.35), grey2: M(0x4a4f55, 0.4, 0.5), silver: M(0xcfd3d8, 0.9, 0.25),
+    card: M(0xc89b5e, 0, 0.9), tape: M(0xe0d2a8, 0, 0.8), convBlue: M(0x1f5fbf, 0.2, 0.5), cabinet: M(0x8a9096, 0.4, 0.5),
     screen: new THREE.MeshStandardMaterial({ color: 0x103a8a, emissive: 0x1a66ff, emissiveIntensity: 1.2 }),
     red: new THREE.MeshStandardMaterial({ color: 0xcc1111, emissive: 0xff2222, emissiveIntensity: 0.8 }),
     green: new THREE.MeshStandardMaterial({ color: 0x11aa33, emissive: 0x22ff55, emissiveIntensity: 0.8 })
@@ -176,12 +190,32 @@
     return out;
   }
 
-  // ------------------------------------------------------------------ cell constants
-  const L1 = 0.6, L2 = 0.55, G = 0.24, SH = 0.35, TRAY = 0.04, PS = 0.08, HOVER = 0.42;
-  const pickC = new THREE.Vector3(-0.6, 0, 0.55), placeC = new THREE.Vector3(0.6, 0, 0.55);
-  const slot = (c, i) => new THREE.Vector3(c.x + ((i % 3) - 1) * 0.14, TRAY + PS / 2, c.z + (Math.floor(i / 3) - 0.5) * 0.14);
-  const hover = p => new THREE.Vector3(p.x, HOVER, p.z);
+  // ------------------------------------------------------------------ palletizing cell constants
+  const L1 = 0.7, L2 = 0.75, G = 0.195, SH = 0.55;               // arm links, tool offset, shoulder height
+  const RB = new THREE.Vector3(0.45, 0, 0.45);                    // robot base
+  const PAL = new THREE.Vector3(-0.45, 0, 0.45);                  // pallet centre
+  const BX = 0.3, BY = 0.16, BZ = 0.2;                            // carton size
+  const PAL_TOP = 0.08, CONV_TOP = 0.325;
+  const PICK = new THREE.Vector3(-0.12, CONV_TOP + BY / 2, -0.45);   // carton waits here at the end of the conveyor
+  const FEED = new THREE.Vector3(0.8, CONV_TOP + BY / 2, -0.45);     // carton enters here
   const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
+  const lift = (p, dy = 0.3) => new THREE.Vector3(p.x, p.y + dy, p.z);
+  const toCyl = p => ({ yaw: Math.atan2(p.x - RB.x, p.z - RB.z), r: Math.hypot(p.x - RB.x, p.z - RB.z), y: p.y });
+  const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+  // 4 layers on the pallet: 2x2 cartons, then 3 cartons turned 90 degrees, repeated (14 cartons)
+  function stackPlan() {
+    const plan = [];
+    for (let L = 0; L < 4; L++) {
+      const y = PAL_TOP + L * BY + BY / 2;
+      if (L % 2 === 0) {
+        for (const sz of [-0.1, 0.1]) for (const sx of [-0.15, 0.15]) plan.push({ p: new THREE.Vector3(PAL.x + sx, y, PAL.z + sz), phi: 0 });
+      } else {
+        for (const sx of [-0.2, 0, 0.2]) plan.push({ p: new THREE.Vector3(PAL.x + sx, y, PAL.z), phi: Math.PI / 2 });
+      }
+    }
+    return plan;
+  }
 
   // ------------------------------------------------------------------ static part of a cell
   function buildStatic() {
@@ -208,19 +242,27 @@
     cyl(g, 0.07, 0.03, -p, 1.645, -p, mat.dark);
     cyl(g, 0.07, 0.02, -p, 1.89, -p, mat.dark);
 
-    // pick tray
-    box(g, 0.5, TRAY, 0.35, pickC.x, TRAY / 2, pickC.z, mat.steel);
-    box(g, 0.5, 0.015, 0.012, pickC.x, 0.0475, pickC.z - 0.169, mat.steel);
-    box(g, 0.5, 0.015, 0.012, pickC.x, 0.0475, pickC.z + 0.169, mat.steel);
-    box(g, 0.012, 0.015, 0.35, pickC.x - 0.244, 0.0475, pickC.z, mat.steel);
-    box(g, 0.012, 0.015, 0.35, pickC.x + 0.244, 0.0475, pickC.z, mat.steel);
-    for (let i = 0; i < 6; i++) { const s = slot(pickC, i); box(g, 0.1, 0.002, 0.1, s.x, TRAY + 0.001, s.z, mat.dark); }
+    // roller conveyor with blue frame (runs along x at the front)
+    box(g, 1.2, 0.04, 0.04, 0.3, 0.28, -0.62, mat.convBlue);
+    box(g, 1.2, 0.04, 0.04, 0.3, 0.28, -0.28, mat.convBlue);
+    for (const x of [-0.25, 0.85]) for (const dz of [-0.17, 0.17]) box(g, 0.05, 0.28, 0.05, x, 0.14, -0.45 + dz, mat.convBlue);
+    box(g, 1.1, 0.03, 0.03, 0.3, 0.12, -0.45, mat.convBlue);
+    for (let i = 0; i < 14; i++) cyl(g, 0.05, 0.3, -0.25 + i * 0.085, 0.30, -0.45, mat.silver, 'z');
+    box(g, 0.03, 0.12, 0.34, -0.3, 0.37, -0.45, mat.dark);   // end stop
 
-    // pallet
-    for (const x of [-0.2, 0, 0.2]) box(g, 0.07, 0.015, 0.35, placeC.x + x, 0.0075, placeC.z, mat.wood);
-    for (const z of [-0.14, -0.047, 0.047, 0.14]) box(g, 0.5, 0.025, 0.07, placeC.x, 0.0275, placeC.z + z, mat.wood);
+    // wooden pallet (0.6 x 0.4)
+    for (const dx of [-0.24, 0, 0.24]) box(g, 0.06, 0.05, 0.4, PAL.x + dx, 0.025, PAL.z, mat.wood);
+    for (const dz of [-0.15, -0.05, 0.05, 0.15]) box(g, 0.6, 0.03, 0.07, PAL.x, 0.065, PAL.z + dz, mat.wood);
 
-    // control pendant
+    // electrical cabinet (front-left) with window, e-stop and handle
+    const cx = -0.7, cz = -0.72;
+    box(g, 0.4, 0.9, 0.28, cx, 0.45, cz, mat.cabinet);
+    box(g, 0.2, 0.15, 0.01, cx, 0.65, cz - 0.145, mat.screen);
+    cyl(g, 0.04, 0.02, cx - 0.1, 0.45, cz - 0.15, mat.red, 'z');
+    cyl(g, 0.03, 0.02, cx + 0.1, 0.45, cz - 0.15, mat.green, 'z');
+    box(g, 0.02, 0.12, 0.02, cx + 0.15, 0.3, cz - 0.15, mat.dark);
+
+    // control pendant on a stand outside the front-right post
     const px = 1.15, pz = -0.6;
     cyl(g, 0.05, 1.5, px, 0.25, pz, mat.grey);
     box(g, 0.16, 0.3, 0.1, px, 1.1, pz, mat.cream);
@@ -263,106 +305,119 @@
     const setState = s => { setLamp(lG, 0x22ff55, s === 1); setLamp(lA, 0xff9900, s === 0); setLamp(lR, 0xff2222, false); };
     setState(0);
 
-    // robot
-    const r = new THREE.Group(); cell.add(r);
-    box(r, 0.5, 0.03, 0.5, 0, 0.015, 0, mat.dark);
-    for (const bx of [-0.2, 0.2]) for (const bz of [-0.2, 0.2]) cyl(r, 0.03, 0.012, bx, 0.036, bz, mat.steel);
-    cyl(r, 0.36, 0.17, 0, 0.115, 0, mat.blue);
-    cyl(r, 0.38, 0.015, 0, 0.2, 0, mat.dark);
+    // ---- white 4-axis palletizing robot
+    const r = new THREE.Group(); r.position.set(RB.x, 0, RB.z); cell.add(r);
+    box(r, 0.55, 0.04, 0.55, 0, 0.02, 0, mat.grey2);
+    for (const bx of [-0.22, 0.22]) for (const bz of [-0.22, 0.22]) cyl(r, 0.035, 0.015, bx, 0.047, bz, mat.steel);
+    cyl(r, 0.42, 0.18, 0, 0.13, 0, mat.white);
 
-    const baseJ = pivot(r, 0, 0.2, 0);
-    cyl(baseJ, 0.32, 0.14, 0, 0.07, 0, mat.blue);
-    box(baseJ, 0.24, 0.2, 0.26, 0, 0.17, 0, mat.blue);
-    cyl(baseJ, 0.11, 0.1, 0.17, 0.15, 0, mat.dark, 'x');
+    const baseJ = pivot(r, 0, 0.22, 0);
+    cyl(baseJ, 0.36, 0.1, 0, 0.05, 0, mat.white);
+    box(baseJ, 0.3, 0.34, 0.28, 0, 0.22, 0, mat.white);
+    cyl(baseJ, 0.16, 0.12, -0.19, 0.28, 0, mat.grey2, 'x');
+    cyl(baseJ, 0.12, 0.1, 0.19, 0.28, 0, mat.grey2, 'x');
 
-    const shoulder = pivot(baseJ, 0, 0.15, 0);
-    cyl(shoulder, 0.2, 0.22, 0, 0, 0, mat.blue, 'x');
-    cyl(shoulder, 0.13, 0.02, -0.115, 0, 0, mat.dark, 'x');
-    cyl(shoulder, 0.13, 0.02, 0.115, 0, 0, mat.dark, 'x');
-    box(shoulder, 0.13, L1 - 0.08, 0.12, 0, L1 / 2, 0, mat.blue);
-    cyl(shoulder, 0.03, L1 - 0.1, 0.05, L1 / 2, -0.085, mat.hose);
+    const shoulder = pivot(baseJ, 0, 0.33, 0);                     // shoulder axis at 0.55 m
+    cyl(shoulder, 0.2, 0.26, 0, 0, 0, mat.white, 'x');
+    cyl(shoulder, 0.14, 0.02, -0.14, 0, 0, mat.grey2, 'x');
+    cyl(shoulder, 0.14, 0.02, 0.14, 0, 0, mat.grey2, 'x');
+    box(shoulder, 0.15, L1 - 0.1, 0.16, 0, L1 / 2, 0, mat.white);
+    cyl(shoulder, 0.04, L1 - 0.05, 0, L1 / 2, -0.15, mat.silver);   // parallel link
 
     const elbow = pivot(shoulder, 0, L1, 0);
-    cyl(elbow, 0.17, 0.2, 0, 0, 0, mat.blue, 'x');
-    cyl(elbow, 0.11, 0.02, -0.105, 0, 0, mat.dark, 'x');
-    cyl(elbow, 0.11, 0.02, 0.105, 0, 0, mat.dark, 'x');
-    box(elbow, 0.10, L2 - 0.18, 0.10, 0, (L2 - 0.1) / 2 + 0.04, 0, mat.blue);
-    cyl(elbow, 0.025, L2 - 0.1, 0.04, L2 / 2, -0.07, mat.hose);
-    cyl(elbow, 0.11, 0.14, 0, L2 - 0.07, 0, mat.blue);
+    cyl(elbow, 0.17, 0.24, 0, 0, 0, mat.white, 'x');
+    cyl(elbow, 0.12, 0.02, -0.13, 0, 0, mat.grey2, 'x');
+    cyl(elbow, 0.12, 0.02, 0.13, 0, 0, mat.grey2, 'x');
+    box(elbow, 0.11, L2 - 0.12, 0.13, 0, L2 / 2, 0, mat.white);
+    cyl(elbow, 0.035, L2 - 0.05, 0, L2 / 2, 0.13, mat.silver);      // parallel link
 
     const wrist = pivot(elbow, 0, L2, 0);
-    cyl(wrist, 0.09, 0.13, 0, 0, 0, mat.dark, 'x');
+    cyl(wrist, 0.12, 0.16, 0, 0, 0, mat.white, 'x');
 
+    // gripper: stays vertical, rotates to turn cartons. Vacuum plate + two side clamps.
     const roll = pivot(wrist, 0, 0, 0);
-    cyl(roll, 0.08, 0.03, 0, 0.015, 0, mat.steel);
-    cyl(roll, 0.06, 0.02, 0, 0.04, 0, mat.dark);
-    box(roll, 0.15, 0.05, 0.07, 0, 0.065, 0, mat.dark);
-    box(roll, 0.2, 0.012, 0.03, 0, 0.092, 0, mat.steel);
-    const fingerL = pivot(roll, -0.075, 0, 0), fingerR = pivot(roll, 0.075, 0, 0);
-    box(fingerL, 0.02, 0.15, 0.06, 0, 0.165, 0, mat.steel);
-    box(fingerL, 0.006, 0.06, 0.055, 0.012, 0.205, 0, mat.rubber);
-    box(fingerR, 0.02, 0.15, 0.06, 0, 0.165, 0, mat.steel);
-    box(fingerR, 0.006, 0.06, 0.055, -0.012, 0.205, 0, mat.rubber);
+    cyl(roll, 0.1, 0.03, 0, 0.02, 0, mat.grey2);
+    cyl(roll, 0.08, 0.04, 0, 0.05, 0, mat.dark);
+    box(roll, 0.42, 0.03, 0.26, 0, 0.08, 0, mat.grey2);
+    for (const cx of [-0.1, 0, 0.1]) for (const cz of [-0.06, 0.06]) cyl(roll, 0.04, 0.02, cx, 0.105, cz, mat.rubber);
+    const clampL = pivot(roll, -0.2, 0, 0), clampR = pivot(roll, 0.2, 0, 0);
+    box(clampL, 0.01, 0.12, 0.19, 0, G, 0, mat.grey2);
+    box(clampL, 0.012, 0.045, 0.12, 0, 0.115, 0, mat.dark);
+    box(clampR, 0.01, 0.12, 0.19, 0, G, 0, mat.grey2);
+    box(clampR, 0.012, 0.045, 0.12, 0, 0.115, 0, mat.dark);
 
-    // state
-    const st = { tool: hover(slot(pickC, 0)), grip: 1 };
-    let parts = [];
+    // state in joint space (so the arm swings in arcs like a real robot)
+    const st = Object.assign({ phi: 0, grip: 1 }, toCyl(lift(PICK)));
+    let stacked = [];
+    const plan = stackPlan();
 
-    function spawnParts() {
-      parts.forEach(o => o.parent && o.parent.remove(o));
-      parts = [];
-      for (let i = 0; i < 6; i++) {
-        const round = i % 2 === 1;
-        const m = round ? mat.brass : (i % 4 === 0 ? mat.alu : mat.orange);
-        const o = put(round ? gCyl(PS, PS) : gBox(PS, PS, PS), m, cell, 0, 0, 0);
-        o.position.copy(slot(pickC, i));
-        parts.push(o);
-      }
+    function newCarton() {
+      const g = new THREE.Group();
+      put(gBox(BX, BY, BZ), mat.card, g, 0, 0, 0);
+      put(gBox(0.045, BY + 0.002, BZ + 0.002), mat.tape, g, 0, 0, 0);
+      cell.add(g);
+      return g;
+    }
+    function feed() {
+      const b = newCarton();
+      b.position.copy(FEED);
+      return tween(2.0, u => { b.position.x = FEED.x + (PICK.x - FEED.x) * u; }).then(() => b);
     }
 
-    // inverse kinematics (same maths as the Unity version)
+    // inverse kinematics: two links reach (r, y); the wrist keeps the gripper vertical
     function update() {
-      const t = st.tool;
-      const yaw = Math.atan2(t.x, t.z);
-      const rr = Math.hypot(t.x, t.z);
-      const h = t.y + G - SH;
-      const d = clamp(Math.hypot(rr, h), Math.abs(L1 - L2) + 0.01, L1 + L2 - 0.01);
-      const phi = Math.atan2(rr, h);
+      const h = st.y + G - SH;
+      const d = clamp(Math.hypot(st.r, h), Math.abs(L1 - L2) + 0.01, L1 + L2 - 0.01);
+      const phi = Math.atan2(st.r, h);
       const alpha = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
       const beta = Math.acos(clamp((L1 * L1 + L2 * L2 - d * d) / (2 * L1 * L2), -1, 1));
       const a1 = phi - alpha, a2 = Math.PI - beta, a3 = Math.PI - a1 - a2;
-      baseJ.rotation.y = yaw; shoulder.rotation.x = a1; elbow.rotation.x = a2; wrist.rotation.x = a3; roll.rotation.y = yaw;
-      const gap = 0.05 + 0.025 * st.grip;
-      fingerL.position.x = -gap; fingerR.position.x = gap;
+      baseJ.rotation.y = st.yaw; shoulder.rotation.x = a1; elbow.rotation.x = a2; wrist.rotation.x = a3;
+      roll.rotation.y = st.yaw - st.phi;
+      const gap = 0.155 + 0.04 * st.grip;
+      clampL.position.x = -gap; clampR.position.x = gap;
     }
 
-    const move = (to, time) => { const from = st.tool.clone(); return tween(time, u => { const s = u * u * (3 - 2 * u); st.tool = new THREE.Vector3().lerpVectors(from, to, s); }); };
+    function move(pt, time, phi) {
+      const f = { yaw: st.yaw, r: st.r, y: st.y, phi: st.phi };
+      const t = toCyl(pt);
+      t.yaw = f.yaw + wrapPi(t.yaw - f.yaw);
+      const tp = f.phi + wrapPi(phi - f.phi);
+      return tween(time, u => {
+        const e = u * u * (3 - 2 * u);
+        st.yaw = f.yaw + (t.yaw - f.yaw) * e; st.r = f.r + (t.r - f.r) * e;
+        st.y = f.y + (t.y - f.y) * e; st.phi = f.phi + (tp - f.phi) * e;
+      });
+    }
     const grip = (v, time) => { const f = st.grip; return tween(time, u => { st.grip = f + (v - f) * u; }); };
 
     async function run() {
-      spawnParts(); setState(0);
+      setState(0);
       await wait(delay); setState(1);
       for (;;) {
-        for (let i = 0; i < parts.length; i++) {
-          const pick = slot(pickC, i), place = slot(placeC, i);
-          await move(hover(pick), 1.0);
-          await grip(1, 0.25);
-          await move(pick, 0.6);
-          await grip(0, 0.3);
+        let box = await feed();
+        for (let i = 0; i < plan.length; i++) {
+          const tgt = plan[i];
+          await move(lift(PICK), 0.9, 0);
+          await grip(1, 0.2);
+          await move(PICK, 0.45, 0);                    // down onto the carton
+          await grip(0, 0.3);                           // clamp
           await wait(0.1);
-          roll.attach(parts[i]);
-          await move(hover(pick), 0.6);
-          await move(hover(place), 1.0);
-          await move(place, 0.6);
-          await grip(1, 0.3);
-          cell.attach(parts[i]);
+          roll.attach(box);
+          const next = i + 1 < plan.length ? feed() : null;   // conveyor brings the next carton
+          await move(lift(PICK), 0.45, 0);
+          await move(lift(tgt.p, 0.28), 1.2, tgt.phi);  // swing over, turning the carton if needed
+          await move(tgt.p, 0.5, tgt.phi);
+          await grip(1, 0.3);                           // release
+          cell.attach(box); stacked.push(box);
           await wait(0.1);
-          await move(hover(place), 0.6);
+          await move(lift(tgt.p, 0.28), 0.45, tgt.phi);
+          if (next) box = await next;
         }
         setState(0);
-        await move(hover(slot(pickC, 0)), 1.0);
-        await wait(1.5);
-        spawnParts();
+        await move(lift(PICK), 1.0, 0);
+        await wait(2);                                   // full pallet leaves
+        stacked.forEach(b => cell.remove(b)); stacked = [];
         await wait(0.5);
         setState(1);
       }
@@ -400,6 +455,7 @@
   // ------------------------------------------------------------------ AR
   const startBtn = document.getElementById('startAR');
   const hud = document.getElementById('hud');
+  const zoom3d = document.getElementById('zoom3d');
   const arui = document.getElementById('arui');
   const arhint = document.getElementById('arhint');
   const note = document.getElementById('note');
@@ -433,7 +489,7 @@
     factory.rotation.y = Math.atan2(dir.x, dir.z);       // aisle runs away from you
     setScale(scaleVal);
     factory.visible = true; placed = true;
-    arhint.textContent = 'Placed. Tap another spot on the floor to move it, or change the scale below.';
+    arhint.textContent = 'Placed. Pinch to zoom, twist with two fingers to rotate, tap the floor to move it.';
   }
 
   async function requestXR() {
@@ -473,7 +529,7 @@
     inAR = true; placed = false;
     scene.background = null;
     room.visible = false; shadowPlane.visible = true; factory.visible = false;
-    hud.style.display = 'none'; arui.style.display = 'flex';
+    hud.style.display = 'none'; zoom3d.style.display = 'none'; arui.style.display = 'flex';
     arhint.textContent = hasHit
       ? 'Move the phone slowly over the floor, then tap the ring to place the factory.'
       : 'Floor detection is not available here. Aim ahead and tap to place the factory about 2 m in front of you.';
@@ -485,8 +541,49 @@
     scene.background = new THREE.Color(0xcfd3d8);
     room.visible = true; shadowPlane.visible = false;
     factory.visible = true; factory.position.set(0, 0, 0); factory.rotation.set(0, 0, 0); factory.scale.setScalar(1); fitShadow(1);
-    hud.style.display = 'flex'; arui.style.display = 'none';
+    hud.style.display = 'flex'; zoom3d.style.display = 'flex'; arui.style.display = 'none';
   }
+
+  // zoom buttons (3D view)
+  function dolly(f) {
+    const v = camera.position.clone().sub(controls.target).multiplyScalar(f);
+    const len = clamp(v.length(), controls.minDistance, controls.maxDistance);
+    camera.position.copy(controls.target).add(v.setLength(len));
+    controls.update();
+  }
+  document.getElementById('z3in').addEventListener('click', () => dolly(0.8));
+  document.getElementById('z3out').addEventListener('click', () => dolly(1.25));
+
+  // zoom buttons (AR)
+  document.getElementById('zin').addEventListener('click', () => setScale(clamp(scaleVal * 1.25, 0.03, 2)));
+  document.getElementById('zout').addEventListener('click', () => setScale(clamp(scaleVal / 1.25, 0.03, 2)));
+
+  // AR touch gestures on a transparent layer: tap = place, pinch = zoom, two-finger twist = rotate
+  const gest = document.getElementById('gest');
+  gest.addEventListener('beforexrselect', e => e.preventDefault());
+  const tdist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const tang = t => Math.atan2(t[1].clientY - t[0].clientY, t[1].clientX - t[0].clientX);
+  let gs = null;
+  gest.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length === 1) gs = { mode: 'tap', x: e.touches[0].clientX, y: e.touches[0].clientY, moved: false };
+    else if (e.touches.length === 2) gs = { mode: 'pinch', d: tdist(e.touches), a: tang(e.touches), scale: scaleVal, rot: factory.rotation.y };
+  }, { passive: false });
+  gest.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!gs) return;
+    if (gs.mode === 'tap' && e.touches.length === 1) {
+      if (Math.hypot(e.touches[0].clientX - gs.x, e.touches[0].clientY - gs.y) > 12) gs.moved = true;
+    } else if (gs.mode === 'pinch' && e.touches.length === 2 && placed) {
+      setScale(clamp(gs.scale * tdist(e.touches) / gs.d, 0.03, 2));
+      factory.rotation.y = gs.rot - (tang(e.touches) - gs.a);
+    }
+  }, { passive: false });
+  gest.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (gs && gs.mode === 'tap' && !gs.moved && e.touches.length === 0) onSelect();
+    gs = e.touches.length === 0 ? null : { mode: 'tap', moved: true, x: 0, y: 0 };
+  }, { passive: false });
 
   startBtn.addEventListener('click', startAR);
 
