@@ -29,6 +29,7 @@
   button:focus-visible { outline: 3px solid #0b5fff; outline-offset: 2px; }
   #startAR { width: 100%; background: var(--yellow); color: var(--ink); }
   #startAR[disabled] { background: #b9bcc0; color: #55595e; cursor: not-allowed; }
+  #spd3 { width: 100%; margin-top: 8px; background: var(--steel); color: #fff; font-size: 18px; min-height: 44px; }
   #note { margin-top: 10px; font-size: 13px; color: #4a5057; line-height: 1.35; }
 
   .zoom { position: fixed; right: max(12px, env(safe-area-inset-right)); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; pointer-events: auto; }
@@ -54,6 +55,7 @@
   <div class="panel">
     <p id="msg">Drag to look around. Pinch to zoom. To see it in your room, start AR and point the phone at the floor.</p>
     <button id="startAR" disabled>Checking AR support…</button>
+    <button id="spd3">Speed: Calm</button>
     <div id="note"></div>
   </div>
 </div>
@@ -68,6 +70,7 @@
     <button data-s="0.25" class="on">1:4</button>
     <button data-s="0.1">1:10</button>
     <button id="reset">Reset</button>
+    <button id="spd">Calm</button>
     <button id="exit" class="exit">Exit AR</button>
   </div>
 </div>
@@ -384,7 +387,7 @@
       t.yaw = f.yaw + wrapPi(t.yaw - f.yaw);
       const tp = f.phi + wrapPi(phi - f.phi);
       return tween(time, u => {
-        const e = u * u * (3 - 2 * u);
+        const e = u * u * u * (u * (6 * u - 15) + 10);   // smootherstep: gentle start and stop
         st.yaw = f.yaw + (t.yaw - f.yaw) * e; st.r = f.r + (t.r - f.r) * e;
         st.y = f.y + (t.y - f.y) * e; st.phi = f.phi + (tp - f.phi) * e;
       });
@@ -464,13 +467,31 @@
   const reticle = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.16, 40).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffc700 }));
   reticle.matrixAutoUpdate = false; reticle.visible = false; scene.add(reticle);
 
+  let animSpeed = 0.5;
   let inAR = false, placed = false, hitSource = null, scaleVal = 0.25, xrSession = null;
 
   function setScale(s) {
     scaleVal = s; factory.scale.setScalar(s); fitShadow(s);
     arui.querySelectorAll('button[data-s]').forEach(b => b.classList.toggle('on', parseFloat(b.dataset.s) === s));
   }
-  arui.querySelectorAll('button[data-s]').forEach(b => b.addEventListener('click', () => setScale(parseFloat(b.dataset.s))));
+  // Zoom / rotate about the floor point under the screen centre, and never change the height,
+  // so the factory stays glued to the floor while you zoom.
+  function pivotPoint() { return reticle.visible ? new THREE.Vector3().setFromMatrixPosition(reticle.matrix) : factory.position.clone(); }
+  function zoomBy(k) {
+    const ns = clamp(scaleVal * k, 0.03, 2);
+    if (!placed) { setScale(ns); return; }
+    const kk = ns / scaleVal, c = pivotPoint();
+    factory.position.x = c.x + (factory.position.x - c.x) * kk;
+    factory.position.z = c.z + (factory.position.z - c.z) * kk;
+    setScale(ns);
+  }
+  function rotateBy(da) {
+    const c = pivotPoint();
+    const off = new THREE.Vector3(factory.position.x - c.x, 0, factory.position.z - c.z).applyAxisAngle(new THREE.Vector3(0, 1, 0), da);
+    factory.position.x = c.x + off.x; factory.position.z = c.z + off.z;
+    factory.rotation.y += da;
+  }
+  arui.querySelectorAll('button[data-s]').forEach(b => b.addEventListener('click', () => zoomBy(parseFloat(b.dataset.s) / scaleVal)));
   document.getElementById('reset').addEventListener('click', () => { placed = false; factory.visible = false; arhint.textContent = 'Tap the ring on the floor to place the factory.'; });
   document.getElementById('exit').addEventListener('click', () => xrSession && xrSession.end());
 
@@ -544,6 +565,19 @@
     hud.style.display = 'flex'; zoom3d.style.display = 'flex'; arui.style.display = 'none';
   }
 
+  // animation speed: Slow / Calm / Normal (default Calm)
+  const SPEEDS = [['Slow', 0.3], ['Calm', 0.5], ['Normal', 1]];
+  let speedIdx = 1;
+  const spdBtn = document.getElementById('spd'), spdBtn3 = document.getElementById('spd3');
+  function cycleSpeed() {
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    animSpeed = SPEEDS[speedIdx][1];
+    spdBtn.textContent = SPEEDS[speedIdx][0];
+    spdBtn3.textContent = 'Speed: ' + SPEEDS[speedIdx][0];
+  }
+  spdBtn.addEventListener('click', cycleSpeed);
+  spdBtn3.addEventListener('click', cycleSpeed);
+
   // zoom buttons (3D view)
   function dolly(f) {
     const v = camera.position.clone().sub(controls.target).multiplyScalar(f);
@@ -555,8 +589,8 @@
   document.getElementById('z3out').addEventListener('click', () => dolly(1.25));
 
   // zoom buttons (AR)
-  document.getElementById('zin').addEventListener('click', () => setScale(clamp(scaleVal * 1.25, 0.03, 2)));
-  document.getElementById('zout').addEventListener('click', () => setScale(clamp(scaleVal / 1.25, 0.03, 2)));
+  document.getElementById('zin').addEventListener('click', () => zoomBy(1.25));
+  document.getElementById('zout').addEventListener('click', () => zoomBy(1 / 1.25));
 
   // AR touch gestures on a transparent layer: tap = place, pinch = zoom, two-finger twist = rotate
   const gest = document.getElementById('gest');
@@ -567,7 +601,7 @@
   gest.addEventListener('touchstart', e => {
     e.preventDefault();
     if (e.touches.length === 1) gs = { mode: 'tap', x: e.touches[0].clientX, y: e.touches[0].clientY, moved: false };
-    else if (e.touches.length === 2) gs = { mode: 'pinch', d: tdist(e.touches), a: tang(e.touches), scale: scaleVal, rot: factory.rotation.y };
+    else if (e.touches.length === 2) gs = { mode: 'pinch', d0: tdist(e.touches), a0: tang(e.touches), prevD: 0, prevA: 0, lock: null };
   }, { passive: false });
   gest.addEventListener('touchmove', e => {
     e.preventDefault();
@@ -575,8 +609,12 @@
     if (gs.mode === 'tap' && e.touches.length === 1) {
       if (Math.hypot(e.touches[0].clientX - gs.x, e.touches[0].clientY - gs.y) > 12) gs.moved = true;
     } else if (gs.mode === 'pinch' && e.touches.length === 2 && placed) {
-      setScale(clamp(gs.scale * tdist(e.touches) / gs.d, 0.03, 2));
-      factory.rotation.y = gs.rot - (tang(e.touches) - gs.a);
+      const d = tdist(e.touches), a = tang(e.touches);
+      if (!gs.lock) {                                   // decide once: is this a pinch or a twist?
+        const dd = Math.abs(d - gs.d0), da = Math.abs(wrapPi(a - gs.a0)) * gs.d0 / 2;
+        if (Math.max(dd, da) > 12) { gs.lock = dd >= da ? 'zoom' : 'rotate'; gs.prevD = d; gs.prevA = a; }
+      } else if (gs.lock === 'zoom') { zoomBy(d / gs.prevD); gs.prevD = d; }
+      else { rotateBy(-wrapPi(a - gs.prevA)); gs.prevA = a; }
     }
   }, { passive: false });
   gest.addEventListener('touchend', e => {
@@ -606,7 +644,7 @@
   const clock = new THREE.Clock();
   renderer.setAnimationLoop((time, frame) => {
     const dt = Math.min(clock.getDelta(), 0.05);
-    if (factory.visible) stepTweens(dt);          // robots wait until the factory is placed
+    if (factory.visible) stepTweens(dt * animSpeed);          // robots wait until the factory is placed
     cells.forEach(c => c.userData.update());
 
     if (inAR && frame && hitSource) {
