@@ -70,6 +70,8 @@
     <button data-s="0.25" class="on">1:4</button>
     <button data-s="0.1">1:10</button>
     <button id="reset">Reset</button>
+    <button id="dn">Lower</button>
+    <button id="up">Raise</button>
     <button id="spd">Calm</button>
     <button id="exit" class="exit">Exit AR</button>
   </div>
@@ -223,12 +225,10 @@
   // ------------------------------------------------------------------ static part of a cell
   function buildStatic() {
     const g = new THREE.Group(), p = 0.98;
-    box(g, 1.92, 0.06, 1.92, 0, -0.47, 0, mat.dark);
-    box(g, 1.9, 0.42, 1.9, 0, -0.23, 0, mat.cream);
-    box(g, 1.86, 0.02, 1.86, 0, -0.01, 0, mat.steel);
+    box(g, 1.9, 0.02, 1.9, 0, 0.01, 0, mat.grey2);            // thin floor mat only: everything stands on the floor
     for (const x of [-p, p]) for (const z of [-p, p]) {
-      box(g, 0.08, 2.1, 0.08, x, 0.55, z, mat.yellow);
-      box(g, 0.16, 0.03, 0.16, x, -0.485, z, mat.dark);
+      box(g, 0.08, 1.6, 0.08, x, 0.8, z, mat.yellow);
+      box(g, 0.16, 0.03, 0.16, x, 0.015, z, mat.dark);
     }
     for (const z of [-p, p]) box(g, 2.04, 0.06, 0.06, 0, 1.6, z, mat.yellow);
     for (const x of [-p, p]) box(g, 0.06, 0.06, 2.04, x, 1.6, 0, mat.yellow);
@@ -267,7 +267,7 @@
 
     // control pendant on a stand outside the front-right post
     const px = 1.15, pz = -0.6;
-    cyl(g, 0.05, 1.5, px, 0.25, pz, mat.grey);
+    cyl(g, 0.05, 1.0, px, 0.5, pz, mat.grey);
     box(g, 0.16, 0.3, 0.1, px, 1.1, pz, mat.cream);
     box(g, 0.11, 0.08, 0.005, px, 1.18, pz - 0.052, mat.screen);
     cyl(g, 0.05, 0.015, px - 0.04, 1.06, pz - 0.057, mat.yellow, 'z');
@@ -296,7 +296,7 @@
 
   function makeCell(x, z, yawDeg, delay) {
     const cell = new THREE.Group();
-    cell.position.set(x, 0.5, z);
+    cell.position.set(x, 0, z);
     cell.rotation.y = yawDeg * Math.PI / 180;
     cell.add(staticTemplate.clone());
 
@@ -541,7 +541,7 @@
     hasHit = false; hitSource = null;
     try {
       const viewer = await xrSession.requestReferenceSpace('viewer');
-      hitSource = await xrSession.requestHitTestSource({ space: viewer });
+      hitSource = await xrSession.requestHitTestSource({ space: viewer, entityTypes: ['plane'] });
       hasHit = !!hitSource;
     } catch (e) { hitSource = null; }
     xrSession.addEventListener('select', onSelect);
@@ -577,6 +577,10 @@
   }
   spdBtn.addEventListener('click', cycleSpeed);
   spdBtn3.addEventListener('click', cycleSpeed);
+
+  // fine height adjustment (1 cm per tap) in case your phone's floor estimate is a little off
+  document.getElementById('dn').addEventListener('click', () => { factory.position.y -= 0.01; });
+  document.getElementById('up').addEventListener('click', () => { factory.position.y += 0.01; });
 
   // zoom buttons (3D view)
   function dolly(f) {
